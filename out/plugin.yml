@@ -1,0 +1,29 @@
+name: DutyCraft
+version: 1.0
+main: com.foxsrv.dutycraft.DutyCraft
+api-version: 1.20
+author: FoxSRV
+description: A duty system plugin for staff members with NBT item protection
+
+commands:
+  setduty:
+    description: Create a new duty template with your current inventory
+    usage: /setduty <name>
+    permission: duty.admin
+  unsetduty:
+    description: Remove an existing duty template
+    usage: /unsetduty <name>
+    permission: duty.admin
+  duty:
+    description: Enter or leave a duty
+    usage: /duty <name>
+
+permissions:
+  duty.admin:
+    description: Allows creating and removing duties
+    default: op
+  duty.*:
+    description: Allows using all duties
+    default: op
+    children:
+      duty.admin: true
