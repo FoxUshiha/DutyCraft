@@ -9,12 +9,14 @@ import org.bukkit.command.TabCompleter;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.entity.Item;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.entity.EntityPickupItemEvent;
+import org.bukkit.event.entity.ItemSpawnEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.inventory.InventoryType;
@@ -297,6 +299,46 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
             }
         }
         return marked;
+    }
+    
+    // NOVO MÉTODO: Remover itens do duty de qualquer inventário de jogador
+    private void removeDutyItemsFromPlayer(Player player) {
+        boolean removed = false;
+        PlayerInventory inv = player.getInventory();
+        
+        // Verificar inventário principal
+        for (int i = 0; i < inv.getSize(); i++) {
+            ItemStack item = inv.getItem(i);
+            if (item != null && isDutyItem(item)) {
+                inv.setItem(i, null);
+                removed = true;
+            }
+        }
+        
+        // Verificar armadura
+        ItemStack[] armor = inv.getArmorContents();
+        for (int i = 0; i < armor.length; i++) {
+            if (armor[i] != null && isDutyItem(armor[i])) {
+                armor[i] = null;
+                removed = true;
+            }
+        }
+        inv.setArmorContents(armor);
+        
+        // Verificar extra (offhand)
+        ItemStack[] extra = inv.getExtraContents();
+        for (int i = 0; i < extra.length; i++) {
+            if (extra[i] != null && isDutyItem(extra[i])) {
+                extra[i] = null;
+                removed = true;
+            }
+        }
+        inv.setExtraContents(extra);
+        
+        if (removed) {
+            player.sendMessage("§cDuty items have been removed from your inventory!");
+            player.updateInventory();
+        }
     }
     
     @Override
@@ -685,12 +727,53 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
         Player player = event.getPlayer();
         ItemStack item = event.getItemDrop().getItemStack();
         
-        if (isPlayerInDuty(player) && isDutyItem(item)) {
+        if (isDutyItem(item)) {
             event.setCancelled(true);
+            event.getItemDrop().remove();
             player.sendMessage("§cYou cannot drop duty items!");
         }
     }
     
+    // NOVO EVENTO: Detectar e remover itens do duty que spawnam no chão
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onItemSpawn(ItemSpawnEvent event) {
+        Item item = event.getEntity();
+        ItemStack itemStack = item.getItemStack();
+        
+        if (isDutyItem(itemStack)) {
+            event.setCancelled(true);
+            item.remove();
+        }
+    }
+    
+    // NOVO EVENTO: Impedir que jogadores peguem itens do duty do chão
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onEntityPickupItem(EntityPickupItemEvent event) {
+        if (event.getEntity() instanceof Player) {
+            ItemStack item = event.getItem().getItemStack();
+            
+            if (isDutyItem(item)) {
+                event.setCancelled(true);
+                event.getItem().remove();
+                ((Player) event.getEntity()).sendMessage("§cYou cannot pick up duty items!");
+            }
+        }
+    }
+    
+    // NOVO EVENTO: Verificar periodicamente inventários de jogadores (executado a cada 5 segundos)
+    private void startInventoryScanner() {
+        new BukkitRunnable() {
+            @Override
+            public void run() {
+                for (Player player : Bukkit.getOnlinePlayers()) {
+                    // Verificar se o jogador NÃO está em duty
+                    if (!isPlayerInDuty(player)) {
+                        removeDutyItemsFromPlayer(player);
+                    }
+                }
+            }
+        }.runTaskTimer(this, 100L, 100L); // 5 segundos (20 ticks * 5)
+    }
     
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onInventoryClick(InventoryClickEvent event) {
@@ -762,6 +845,24 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
                 
                 // Para todos os outros casos (movimentação dentro do próprio inventário do jogador),
                 // permitir movimento normal de itens
+            } else {
+                // Jogador não está em duty - verificar se ele tem itens do duty no inventário
+                ItemStack currentItem = event.getCurrentItem();
+                ItemStack cursorItem = event.getCursor();
+                
+                if ((currentItem != null && isDutyItem(currentItem)) || 
+                    (cursorItem != null && isDutyItem(cursorItem))) {
+                    
+                    // Remover os itens do duty
+                    if (currentItem != null && isDutyItem(currentItem)) {
+                        event.setCurrentItem(null);
+                    }
+                    if (cursorItem != null && isDutyItem(cursorItem)) {
+                        event.getWhoClicked().setItemOnCursor(null);
+                    }
+                    
+                    player.sendMessage("§cDuty items have been removed from your inventory!");
+                }
             }
         }
     }
@@ -818,6 +919,15 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
                 }
                 
                 // Para itens normais em slots normais, permitir drag
+            } else {
+                // Jogador não está em duty - verificar itens do duty no drag
+                for (ItemStack item : event.getNewItems().values()) {
+                    if (isDutyItem(item)) {
+                        event.setCancelled(true);
+                        player.sendMessage("§cDuty items cannot be moved!");
+                        return;
+                    }
+                }
             }
         }
     }
@@ -827,7 +937,7 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
         Player player = event.getPlayer();
         ItemStack item = player.getInventory().getItemInMainHand();
         
-        if (isPlayerInDuty(player) && isDutyItem(item)) {
+        if (isDutyItem(item)) {
             event.setCancelled(true);
             player.sendMessage("§cYou cannot place duty blocks!");
         }
@@ -857,16 +967,22 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
             
             // Para itens normais, permitir interações normais
             // Interação com blocos usando a mão vazia ou itens normais - permitir
+        } else {
+            // Jogador não está em duty - verificar se está usando item do duty
+            if (event.hasItem() && isDutyItem(event.getItem())) {
+                event.setCancelled(true);
+                player.getInventory().setItemInMainHand(null);
+                player.sendMessage("§cDuty items have been removed from your inventory!");
+            }
         }
     }
     
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onPlayerInteractEntity(PlayerInteractEntityEvent event) {
         Player player = event.getPlayer();
+        ItemStack item = player.getInventory().getItemInMainHand();
         
         if (isPlayerInDuty(player)) {
-            ItemStack item = player.getInventory().getItemInMainHand();
-            
             // Se estiver usando item do duty em entidade, bloquear (a menos que seja permitido)
             if (item != null && isDutyItem(item)) {
                 if (!allowedUsableMaterials.contains(item.getType())) {
@@ -875,22 +991,34 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
                 }
             }
             // Para itens normais, permitir interagir com entidades
+        } else {
+            // Jogador não está em duty - verificar item do duty
+            if (item != null && isDutyItem(item)) {
+                event.setCancelled(true);
+                player.getInventory().setItemInMainHand(null);
+                player.sendMessage("§cDuty items have been removed from your inventory!");
+            }
         }
     }
     
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onArmorStandManipulate(PlayerArmorStandManipulateEvent event) {
         Player player = event.getPlayer();
+        ItemStack item = event.getPlayerItem();
         
         if (isPlayerInDuty(player)) {
-            ItemStack item = event.getPlayerItem();
-            
             // Se estiver usando item do duty em armor stand, bloquear
             if (item != null && isDutyItem(item)) {
                 event.setCancelled(true);
                 player.sendMessage("§cYou cannot use duty items on armor stands!");
             }
             // Para itens normais, permitir manipular armor stands
+        } else {
+            // Jogador não está em duty - verificar item do duty
+            if (item != null && isDutyItem(item)) {
+                event.setCancelled(true);
+                player.sendMessage("§cDuty items cannot be used!");
+            }
         }
     }
     
@@ -910,6 +1038,9 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
                 savePlayerData();
             });
         }
+        
+        // Verificar se o jogador tem itens do duty no inventário ao entrar
+        removeDutyItemsFromPlayer(player);
     }
     
     @EventHandler
