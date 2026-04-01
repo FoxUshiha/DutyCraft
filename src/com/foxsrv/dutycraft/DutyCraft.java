@@ -34,10 +34,15 @@ import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitRunnable;
+import org.bukkit.util.io.BukkitObjectInputStream;
+import org.bukkit.util.io.BukkitObjectOutputStream;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -64,8 +69,6 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
     
     // Slots da armadura
     private final int[] ARMOR_SLOTS = {36, 37, 38, 39}; // Boots, Leggings, Chestplate, Helmet
-    // Slot da mão secundária (offhand)
-    private final int OFFHAND_SLOT = 40;
     
     @Override
     public void onEnable() {
@@ -73,36 +76,45 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
         dutyItemKey = new NamespacedKey(this, "duty_item");
         dutyNameKey = new NamespacedKey(this, "duty_name");
         
+        // Criar pasta do plugin
+        if (!getDataFolder().exists()) {
+            getDataFolder().mkdirs();
+        }
+        
         // Criar arquivos de configuração
         createFiles();
         
         // Registrar tab completer
-        getCommand("setduty").setTabCompleter(this);
-        getCommand("unsetduty").setTabCompleter(this);
-        getCommand("duty").setTabCompleter(this);
+        if (getCommand("setduty") != null) {
+            getCommand("setduty").setTabCompleter(this);
+        }
+        if (getCommand("unsetduty") != null) {
+            getCommand("unsetduty").setTabCompleter(this);
+        }
+        if (getCommand("duty") != null) {
+            getCommand("duty").setTabCompleter(this);
+        }
         
-        // Carregar dados de forma assíncrona
-        CompletableFuture.runAsync(() -> {
-            loadDuties();
-            loadPlayerData();
-        }).thenRun(() -> {
-            // Registrar eventos após carregar dados
-            getServer().getPluginManager().registerEvents(this, this);
-            
-            // Configurar materiais permitidos
-            setupAllowedMaterials();
-            
-            getLogger().info("DutyCraft has been enabled successfully!");
-            getLogger().info("Loaded " + duties.size() + " duties!");
-        }).exceptionally(throwable -> {
-            getLogger().severe("Error loading data: " + throwable.getMessage());
-            return null;
-        });
+        // Carregar dados
+        loadDuties();
+        loadPlayerData();
+        
+        // Registrar eventos
+        getServer().getPluginManager().registerEvents(this, this);
+        
+        // Configurar materiais permitidos
+        setupAllowedMaterials();
+        
+        // Iniciar scanner de inventário
+        startInventoryScanner();
+        
+        getLogger().info("DutyCraft has been enabled successfully!");
+        getLogger().info("Loaded " + duties.size() + " duties!");
     }
     
     @Override
     public void onDisable() {
-        // Salvar dados de forma síncrona ao desabilitar
+        // Salvar dados
         savePlayerData();
         saveDuties();
         
@@ -113,7 +125,6 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
         // Arquivo de duties
         dutiesFile = new File(getDataFolder(), "duties.yml");
         if (!dutiesFile.exists()) {
-            dutiesFile.getParentFile().mkdirs();
             try {
                 dutiesFile.createNewFile();
             } catch (IOException e) {
@@ -125,7 +136,6 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
         // Arquivo de dados dos jogadores
         playerDataFile = new File(getDataFolder(), "playerdata.yml");
         if (!playerDataFile.exists()) {
-            playerDataFile.getParentFile().mkdirs();
             try {
                 playerDataFile.createNewFile();
             } catch (IOException e) {
@@ -201,11 +211,12 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
                 for (String key : section.getKeys(false)) {
                     try {
                         Duty duty = new Duty(key);
-                        duty.loadFromConfig(section.getConfigurationSection(key));
+                        duty.loadFromConfig(section.getConfigurationSection(key), this);
                         duties.put(key, duty);
                         getLogger().info("Loaded duty: " + key);
                     } catch (Exception e) {
                         getLogger().warning("Error loading duty '" + key + "': " + e.getMessage());
+                        e.printStackTrace();
                     }
                 }
             }
@@ -237,7 +248,7 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
                     try {
                         UUID uuid = UUID.fromString(key);
                         PlayerDutyData data = new PlayerDutyData(uuid);
-                        data.loadFromConfig(section.getConfigurationSection(key));
+                        data.loadFromConfig(section.getConfigurationSection(key), this);
                         playerDutyData.put(uuid, data);
                     } catch (IllegalArgumentException e) {
                         getLogger().warning("Invalid UUID found: " + key);
@@ -262,17 +273,99 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
         }
     }
     
+    // Serialização completa de ItemStack usando Base64
+    public String serializeItemStack(ItemStack item) {
+        if (item == null || item.getType() == Material.AIR) return "";
+        
+        try {
+            ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+            BukkitObjectOutputStream dataOutput = new BukkitObjectOutputStream(outputStream);
+            
+            dataOutput.writeObject(item);
+            dataOutput.close();
+            
+            return Base64.getEncoder().encodeToString(outputStream.toByteArray());
+        } catch (IOException e) {
+            e.printStackTrace();
+            return "";
+        }
+    }
+    
+    public ItemStack deserializeItemStack(String data) {
+        if (data == null || data.isEmpty()) return null;
+        
+        try {
+            ByteArrayInputStream inputStream = new ByteArrayInputStream(Base64.getDecoder().decode(data));
+            BukkitObjectInputStream dataInput = new BukkitObjectInputStream(inputStream);
+            
+            ItemStack item = (ItemStack) dataInput.readObject();
+            dataInput.close();
+            
+            return item;
+        } catch (IOException | ClassNotFoundException e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
+    
+    public String serializeItemStackArray(ItemStack[] items) {
+        if (items == null) return "";
+        
+        try {
+            ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+            BukkitObjectOutputStream dataOutput = new BukkitObjectOutputStream(outputStream);
+            
+            dataOutput.writeInt(items.length);
+            
+            for (ItemStack item : items) {
+                dataOutput.writeObject(item);
+            }
+            
+            dataOutput.close();
+            return Base64.getEncoder().encodeToString(outputStream.toByteArray());
+            
+        } catch (IOException e) {
+            e.printStackTrace();
+            return "";
+        }
+    }
+    
+    public ItemStack[] deserializeItemStackArray(String data) {
+        if (data == null || data.isEmpty()) return new ItemStack[0];
+        
+        try {
+            ByteArrayInputStream inputStream = new ByteArrayInputStream(Base64.getDecoder().decode(data));
+            BukkitObjectInputStream dataInput = new BukkitObjectInputStream(inputStream);
+            
+            int length = dataInput.readInt();
+            ItemStack[] items = new ItemStack[length];
+            
+            for (int i = 0; i < length; i++) {
+                items[i] = (ItemStack) dataInput.readObject();
+            }
+            
+            dataInput.close();
+            return items;
+            
+        } catch (IOException | ClassNotFoundException e) {
+            e.printStackTrace();
+            return new ItemStack[0];
+        }
+    }
+    
     // Métodos para verificar e marcar itens do duty
-    private boolean isDutyItem(ItemStack item) {
-        if (item == null || !item.hasItemMeta()) return false;
+    public boolean isDutyItem(ItemStack item) {
+        if (item == null || item.getType() == Material.AIR || !item.hasItemMeta()) return false;
         ItemMeta meta = item.getItemMeta();
+        if (meta == null) return false;
         PersistentDataContainer container = meta.getPersistentDataContainer();
         return container.has(dutyItemKey, PersistentDataType.BOOLEAN);
     }
     
-    private String getDutyNameFromItem(ItemStack item) {
-        if (item == null || !item.hasItemMeta()) return null;
+    public String getDutyNameFromItem(ItemStack item) {
+        if (item == null || item.getType() == Material.AIR || !item.hasItemMeta()) return null;
         ItemMeta meta = item.getItemMeta();
+        if (meta == null) return null;
         PersistentDataContainer container = meta.getPersistentDataContainer();
         if (container.has(dutyNameKey, PersistentDataType.STRING)) {
             return container.get(dutyNameKey, PersistentDataType.STRING);
@@ -280,28 +373,30 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
         return null;
     }
     
-    private ItemStack markAsDutyItem(ItemStack item, String dutyName) {
+    public ItemStack markAsDutyItem(ItemStack item, String dutyName) {
         if (item == null || item.getType() == Material.AIR) return item;
-        ItemMeta meta = item.getItemMeta();
+        ItemStack cloned = item.clone();
+        ItemMeta meta = cloned.getItemMeta();
+        if (meta == null) return cloned;
         PersistentDataContainer container = meta.getPersistentDataContainer();
         container.set(dutyItemKey, PersistentDataType.BOOLEAN, true);
         container.set(dutyNameKey, PersistentDataType.STRING, dutyName);
-        item.setItemMeta(meta);
-        return item;
+        cloned.setItemMeta(meta);
+        return cloned;
     }
     
-    private ItemStack[] markInventoryAsDuty(ItemStack[] items, String dutyName) {
+    public ItemStack[] markInventoryAsDuty(ItemStack[] items, String dutyName) {
         if (items == null) return null;
         ItemStack[] marked = new ItemStack[items.length];
         for (int i = 0; i < items.length; i++) {
             if (items[i] != null && items[i].getType() != Material.AIR) {
-                marked[i] = markAsDutyItem(items[i].clone(), dutyName);
+                marked[i] = markAsDutyItem(items[i], dutyName);
             }
         }
         return marked;
     }
     
-    // NOVO MÉTODO: Remover itens do duty de qualquer inventário de jogador
+    // Método para remover itens do duty de qualquer inventário de jogador
     private void removeDutyItemsFromPlayer(Player player) {
         boolean removed = false;
         PlayerInventory inv = player.getInventory();
@@ -420,7 +515,7 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
         
         String finalDutyName = dutyName;
         
-        player.sendMessage("§7Creating duty '" + finalDutyName + "'... This may take a few seconds.");
+        player.sendMessage("§7Creating duty '" + finalDutyName + "'...");
         
         CompletableFuture.runAsync(() -> {
             try {
@@ -441,23 +536,18 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
                 duty.setExtraContents(markedExtra);
                 
                 duties.put(finalDutyName, duty);
-                saveDuties();
-                
-                // Criar cópias finais para usar no BukkitRunnable
-                final ItemStack[] finalInventory = markedInventory;
-                final ItemStack[] finalArmor = markedArmor;
-                final ItemStack[] finalExtra = markedExtra;
                 
                 new BukkitRunnable() {
                     @Override
                     public void run() {
+                        saveDuties();
                         player.sendMessage("§aDuty '" + finalDutyName + "' created successfully!");
                         player.sendMessage("§7Required permission: duty." + finalDutyName);
-                        player.sendMessage("§7Inventory saved: " + countItems(finalInventory) + " items, " + 
-                                          countItems(finalArmor) + " armor pieces, " + 
-                                          countItems(finalExtra) + " offhand items");
+                        player.sendMessage("§7Inventory saved: " + countItems(markedInventory) + " items, " + 
+                                          countItems(markedArmor) + " armor pieces, " + 
+                                          countItems(markedExtra) + " offhand items");
                     }
-                }.runTask(this);
+                }.runTask(DutyCraft.this);
                 
             } catch (Exception e) {
                 e.printStackTrace();
@@ -466,7 +556,7 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
                     public void run() {
                         player.sendMessage("§cError creating duty: " + e.getMessage());
                     }
-                }.runTask(this);
+                }.runTask(DutyCraft.this);
             }
         });
         
@@ -522,14 +612,14 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
         
         CompletableFuture.runAsync(() -> {
             duties.remove(finalDutyName);
-            saveDuties();
-        }).thenRun(() -> {
+            
             new BukkitRunnable() {
                 @Override
                 public void run() {
+                    saveDuties();
                     player.sendMessage("§aDuty '" + finalDutyName + "' removed successfully!");
                 }
-            }.runTask(this);
+            }.runTask(DutyCraft.this);
         });
         
         return true;
@@ -558,121 +648,94 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
         
         if (data.isInDuty() && data.getCurrentDuty().equals(dutyName)) {
             player.sendMessage("§7Leaving duty...");
-            
-            CompletableFuture.runAsync(() -> {
-                leaveDuty(player, data);
-            }).thenRun(() -> {
-                new BukkitRunnable() {
-                    @Override
-                    public void run() {
-                        playerDutyData.put(player.getUniqueId(), data);
-                        savePlayerData();
-                        player.sendMessage("§aYou have left the duty '" + dutyName + "'!");
-                    }
-                }.runTask(this);
-            });
+            leaveDuty(player, data);
+            playerDutyData.put(player.getUniqueId(), data);
+            savePlayerData();
+            player.sendMessage("§aYou have left the duty '" + dutyName + "'!");
         } else if (data.isInDuty()) {
             player.sendMessage("§cYou are already in another duty! Leave it first with /duty " + data.getCurrentDuty());
         } else {
             player.sendMessage("§7Entering duty...");
-            
-            CompletableFuture.runAsync(() -> {
-                enterDuty(player, data, duty);
-            }).thenRun(() -> {
-                new BukkitRunnable() {
-                    @Override
-                    public void run() {
-                        playerDutyData.put(player.getUniqueId(), data);
-                        savePlayerData();
-                        player.sendMessage("§aYou have entered duty '" + duty.getName() + "'!");
-                        player.sendMessage("§7Duty items are protected!");
-                        player.sendMessage("§7- You can organize and use duty items normally");
-                        player.sendMessage("§7- Armor slots are locked");
-                        player.sendMessage("§7- Cannot drop or place duty items");
-                        player.sendMessage("§7- Cannot put duty items in any external container");
-                    }
-                }.runTask(this);
-            });
+            enterDuty(player, data, duty);
+            playerDutyData.put(player.getUniqueId(), data);
+            savePlayerData();
+            player.sendMessage("§aYou have entered duty '" + duty.getName() + "'!");
+            player.sendMessage("§7Duty items are protected!");
+            player.sendMessage("§7- You can organize and use duty items normally");
+            player.sendMessage("§7- Armor slots are locked");
+            player.sendMessage("§7- Cannot drop or place duty items");
+            player.sendMessage("§7- Cannot put duty items in any external container");
+            player.sendMessage("§7- Can interact with other players using duty items");
         }
         
         return true;
     }
     
     private void enterDuty(Player player, PlayerDutyData data, Duty duty) {
-        new BukkitRunnable() {
-            @Override
-            public void run() {
-                // Salvar inventário original
-                ItemStack[] originalInventory = player.getInventory().getContents();
-                ItemStack[] originalArmor = player.getInventory().getArmorContents();
-                ItemStack[] originalExtra = player.getInventory().getExtraContents();
-                
-                ItemStack[] inventoryCopy = new ItemStack[originalInventory.length];
-                ItemStack[] armorCopy = new ItemStack[originalArmor.length];
-                ItemStack[] extraCopy = new ItemStack[originalExtra.length];
-                
-                for (int i = 0; i < originalInventory.length; i++) {
-                    if (originalInventory[i] != null) {
-                        inventoryCopy[i] = originalInventory[i].clone();
-                    }
-                }
-                
-                for (int i = 0; i < originalArmor.length; i++) {
-                    if (originalArmor[i] != null) {
-                        armorCopy[i] = originalArmor[i].clone();
-                    }
-                }
-                
-                for (int i = 0; i < originalExtra.length; i++) {
-                    if (originalExtra[i] != null) {
-                        extraCopy[i] = originalExtra[i].clone();
-                    }
-                }
-                
-                data.setOriginalInventory(inventoryCopy);
-                data.setOriginalArmor(armorCopy);
-                data.setOriginalExtraContents(extraCopy);
-                data.setCurrentDuty(duty.getName());
-                data.setInDuty(true);
-                
-                // Limpar inventário atual
-                player.getInventory().clear();
-                
-                // Aplicar inventário do duty (já vem com NBT)
-                duty.applyToInventory(player.getInventory());
-                
-                player.updateInventory();
+        // Salvar inventário original
+        ItemStack[] originalInventory = player.getInventory().getContents();
+        ItemStack[] originalArmor = player.getInventory().getArmorContents();
+        ItemStack[] originalExtra = player.getInventory().getExtraContents();
+        
+        ItemStack[] inventoryCopy = new ItemStack[originalInventory.length];
+        ItemStack[] armorCopy = new ItemStack[originalArmor.length];
+        ItemStack[] extraCopy = new ItemStack[originalExtra.length];
+        
+        for (int i = 0; i < originalInventory.length; i++) {
+            if (originalInventory[i] != null && originalInventory[i].getType() != Material.AIR) {
+                inventoryCopy[i] = originalInventory[i].clone();
             }
-        }.runTask(this);
+        }
+        
+        for (int i = 0; i < originalArmor.length; i++) {
+            if (originalArmor[i] != null && originalArmor[i].getType() != Material.AIR) {
+                armorCopy[i] = originalArmor[i].clone();
+            }
+        }
+        
+        for (int i = 0; i < originalExtra.length; i++) {
+            if (originalExtra[i] != null && originalExtra[i].getType() != Material.AIR) {
+                extraCopy[i] = originalExtra[i].clone();
+            }
+        }
+        
+        data.setOriginalInventory(inventoryCopy);
+        data.setOriginalArmor(armorCopy);
+        data.setOriginalExtraContents(extraCopy);
+        data.setCurrentDuty(duty.getName());
+        data.setInDuty(true);
+        
+        // Limpar inventário atual
+        player.getInventory().clear();
+        
+        // Aplicar inventário do duty (já vem com NBT)
+        duty.applyToInventory(player.getInventory());
+        
+        player.updateInventory();
     }
     
     private void leaveDuty(Player player, PlayerDutyData data) {
-        new BukkitRunnable() {
-            @Override
-            public void run() {
-                // Limpar inventário atual (que tem itens do duty)
-                player.getInventory().clear();
-                
-                // Restaurar inventário original
-                if (data.getOriginalInventory() != null) {
-                    player.getInventory().setContents(data.getOriginalInventory());
-                }
-                if (data.getOriginalArmor() != null) {
-                    player.getInventory().setArmorContents(data.getOriginalArmor());
-                }
-                if (data.getOriginalExtraContents() != null) {
-                    player.getInventory().setExtraContents(data.getOriginalExtraContents());
-                }
-                
-                data.setInDuty(false);
-                data.setCurrentDuty(null);
-                data.setOriginalInventory(null);
-                data.setOriginalArmor(null);
-                data.setOriginalExtraContents(null);
-                
-                player.updateInventory();
-            }
-        }.runTask(this);
+        // Limpar inventário atual (que tem itens do duty)
+        player.getInventory().clear();
+        
+        // Restaurar inventário original
+        if (data.getOriginalInventory() != null) {
+            player.getInventory().setContents(data.getOriginalInventory());
+        }
+        if (data.getOriginalArmor() != null) {
+            player.getInventory().setArmorContents(data.getOriginalArmor());
+        }
+        if (data.getOriginalExtraContents() != null) {
+            player.getInventory().setExtraContents(data.getOriginalExtraContents());
+        }
+        
+        data.setInDuty(false);
+        data.setCurrentDuty(null);
+        data.setOriginalInventory(null);
+        data.setOriginalArmor(null);
+        data.setOriginalExtraContents(null);
+        
+        player.updateInventory();
     }
     
     private boolean isPlayerInDuty(Player player) {
@@ -716,8 +779,8 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
                type == InventoryType.MERCHANT ||
                type == InventoryType.COMPOSTER ||
                type == InventoryType.JUKEBOX ||
-               type.name().contains("WORKBENCH") || // Para versões mais antigas
-               type == InventoryType.CRAFTING; // Mesa de trabalho
+               type.name().contains("WORKBENCH") ||
+               type == InventoryType.CRAFTING;
     }
     
     // Eventos com proteção baseada em NBT
@@ -734,7 +797,6 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
         }
     }
     
-    // NOVO EVENTO: Detectar e remover itens do duty que spawnam no chão
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onItemSpawn(ItemSpawnEvent event) {
         Item item = event.getEntity();
@@ -746,7 +808,6 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
         }
     }
     
-    // NOVO EVENTO: Impedir que jogadores peguem itens do duty do chão
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onEntityPickupItem(EntityPickupItemEvent event) {
         if (event.getEntity() instanceof Player) {
@@ -760,19 +821,17 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
         }
     }
     
-    // NOVO EVENTO: Verificar periodicamente inventários de jogadores (executado a cada 5 segundos)
     private void startInventoryScanner() {
         new BukkitRunnable() {
             @Override
             public void run() {
                 for (Player player : Bukkit.getOnlinePlayers()) {
-                    // Verificar se o jogador NÃO está em duty
                     if (!isPlayerInDuty(player)) {
                         removeDutyItemsFromPlayer(player);
                     }
                 }
             }
-        }.runTaskTimer(this, 100L, 100L); // 5 segundos (20 ticks * 5)
+        }.runTaskTimer(this, 100L, 100L);
     }
     
     @EventHandler(priority = EventPriority.HIGHEST)
@@ -789,40 +848,32 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
                 ItemStack cursorItem = event.getCursor();
                 ItemStack hotbarItem = null;
                 
-                // Verificar se é uma ação de hotbar (números 1-9 ou F)
                 if (event.getHotbarButton() != -1) {
                     hotbarItem = player.getInventory().getItem(event.getHotbarButton());
                 }
                 
-                // Verificar se qualquer item envolvido é do duty
                 boolean hasDutyItem = (currentItem != null && isDutyItem(currentItem)) ||
                                       (cursorItem != null && isDutyItem(cursorItem)) ||
                                       (hotbarItem != null && isDutyItem(hotbarItem));
                 
                 if (hasDutyItem) {
-                    // Verificar se o inventário clicado é externo
                     if (clickedInventory != null && isExternalInventory(clickedInventory)) {
-                        // Bloquear qualquer interação com itens do duty em inventários externos
                         event.setCancelled(true);
                         player.sendMessage("§cYou cannot interact with duty items in external containers!");
                         return;
                     }
                     
-                    // Verificar se o inventário superior é externo (para casos de shift+click)
                     if (topInventory != null && isExternalInventory(topInventory) && event.isShiftClick()) {
-                        // Shift-click em item do duty com inventário externo aberto
                         event.setCancelled(true);
                         player.sendMessage("§cYou cannot move duty items to external containers!");
                         return;
                     }
                     
-                    // Verificar se está movendo para o inventário superior (externo)
                     if (topInventory != null && isExternalInventory(topInventory)) {
                         if (event.getAction().name().contains("PLACE") || 
                             event.getAction().name().contains("SWAP") ||
                             event.getAction().name().contains("HOTBAR")) {
                             
-                            // Se o slot clicado for do inventário superior, bloquear
                             if (clickedInventory != null && clickedInventory.equals(topInventory)) {
                                 event.setCancelled(true);
                                 player.sendMessage("§cYou cannot put duty items in external containers!");
@@ -832,7 +883,6 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
                     }
                 }
                 
-                // Verificar slots de armadura - SEMPRE BLOQUEAR interação com slots de armadura
                 if (clickedInventory != null && clickedInventory.equals(bottomInventory)) {
                     if (event.getSlot() >= 0 && event.getSlot() < player.getInventory().getSize()) {
                         if (isArmorSlot(event.getSlot())) {
@@ -842,18 +892,13 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
                         }
                     }
                 }
-                
-                // Para todos os outros casos (movimentação dentro do próprio inventário do jogador),
-                // permitir movimento normal de itens
             } else {
-                // Jogador não está em duty - verificar se ele tem itens do duty no inventário
                 ItemStack currentItem = event.getCurrentItem();
                 ItemStack cursorItem = event.getCursor();
                 
                 if ((currentItem != null && isDutyItem(currentItem)) || 
                     (cursorItem != null && isDutyItem(cursorItem))) {
                     
-                    // Remover os itens do duty
                     if (currentItem != null && isDutyItem(currentItem)) {
                         event.setCurrentItem(null);
                     }
@@ -876,7 +921,6 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
                 Inventory topInventory = event.getView().getTopInventory();
                 Inventory bottomInventory = event.getView().getBottomInventory();
                 
-                // Verificar se algum item sendo arrastado é do duty
                 boolean hasDutyItem = false;
                 for (ItemStack item : event.getNewItems().values()) {
                     if (isDutyItem(item)) {
@@ -886,18 +930,14 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
                 }
                 
                 if (hasDutyItem) {
-                    // Verificar se algum slot de destino é de inventário externo
                     for (Integer slot : event.getRawSlots()) {
-                        // Determinar a qual inventário o slot pertence
                         if (slot >= 0 && slot < bottomInventory.getSize()) {
-                            // Slot do jogador - verificar se é armor
                             if (isArmorSlot(slot)) {
                                 event.setCancelled(true);
                                 player.sendMessage("§cYou cannot modify armor slots while in duty!");
                                 return;
                             }
                         } else {
-                            // Slot possivelmente externo
                             if (topInventory != null && isExternalInventory(topInventory)) {
                                 event.setCancelled(true);
                                 player.sendMessage("§cYou cannot put duty items in external containers!");
@@ -906,7 +946,6 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
                         }
                     }
                 } else {
-                    // Itens normais - verificar apenas slots de armadura
                     for (Integer slot : event.getRawSlots()) {
                         if (slot >= 0 && slot < bottomInventory.getSize()) {
                             if (isArmorSlot(slot)) {
@@ -917,10 +956,7 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
                         }
                     }
                 }
-                
-                // Para itens normais em slots normais, permitir drag
             } else {
-                // Jogador não está em duty - verificar itens do duty no drag
                 for (ItemStack item : event.getNewItems().values()) {
                     if (isDutyItem(item)) {
                         event.setCancelled(true);
@@ -948,27 +984,20 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
         Player player = event.getPlayer();
         
         if (isPlayerInDuty(player)) {
-            // Verificar se está interagindo com bloco usando item do duty
             if (event.hasItem() && isDutyItem(event.getItem())) {
                 Material itemType = event.getItem().getType();
                 
-                // Permitir usar itens permitidos mesmo sendo do duty (comer, beber, etc.)
                 if (allowedUsableMaterials.contains(itemType)) {
-                    return; // Permitir uso
+                    return;
                 }
                 
-                // Bloquear outras interações com itens do duty (como clicar em blocos com ferramentas)
                 if (event.hasBlock()) {
                     event.setCancelled(true);
                     player.sendMessage("§cYou cannot use duty items on blocks!");
                     return;
                 }
             }
-            
-            // Para itens normais, permitir interações normais
-            // Interação com blocos usando a mão vazia ou itens normais - permitir
         } else {
-            // Jogador não está em duty - verificar se está usando item do duty
             if (event.hasItem() && isDutyItem(event.getItem())) {
                 event.setCancelled(true);
                 player.getInventory().setItemInMainHand(null);
@@ -983,16 +1012,20 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
         ItemStack item = player.getInventory().getItemInMainHand();
         
         if (isPlayerInDuty(player)) {
-            // Se estiver usando item do duty em entidade, bloquear (a menos que seja permitido)
+            // Permitir interação com jogadores usando itens do duty
+            if (event.getRightClicked() instanceof Player) {
+                // Permite interagir com outros jogadores
+                return;
+            }
+            
+            // Para outras entidades, aplicar as regras normais
             if (item != null && isDutyItem(item)) {
                 if (!allowedUsableMaterials.contains(item.getType())) {
                     event.setCancelled(true);
                     player.sendMessage("§cYou cannot use duty items on entities!");
                 }
             }
-            // Para itens normais, permitir interagir com entidades
         } else {
-            // Jogador não está em duty - verificar item do duty
             if (item != null && isDutyItem(item)) {
                 event.setCancelled(true);
                 player.getInventory().setItemInMainHand(null);
@@ -1007,14 +1040,11 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
         ItemStack item = event.getPlayerItem();
         
         if (isPlayerInDuty(player)) {
-            // Se estiver usando item do duty em armor stand, bloquear
             if (item != null && isDutyItem(item)) {
                 event.setCancelled(true);
                 player.sendMessage("§cYou cannot use duty items on armor stands!");
             }
-            // Para itens normais, permitir manipular armor stands
         } else {
-            // Jogador não está em duty - verificar item do duty
             if (item != null && isDutyItem(item)) {
                 event.setCancelled(true);
                 player.sendMessage("§cDuty items cannot be used!");
@@ -1028,18 +1058,13 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
         PlayerDutyData data = playerDutyData.get(player.getUniqueId());
         
         if (data != null && data.isInDuty()) {
-            // Se o jogador estava em duty quando saiu, remover do duty por segurança
             data.setInDuty(false);
             data.setCurrentDuty(null);
             player.sendMessage("§cYou have been removed from duty due to logout!");
             
-            // Salvar alteração
-            CompletableFuture.runAsync(() -> {
-                savePlayerData();
-            });
+            savePlayerData();
         }
         
-        // Verificar se o jogador tem itens do duty no inventário ao entrar
         removeDutyItemsFromPlayer(player);
     }
     
@@ -1048,27 +1073,22 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
         Player player = event.getPlayer();
         PlayerDutyData data = playerDutyData.get(player.getUniqueId());
         
-        if (data != null) {
-            if (data.isInDuty()) {
-                // Restaurar inventário antes de salvar
-                if (data.getOriginalInventory() != null) {
-                    player.getInventory().setContents(data.getOriginalInventory());
-                }
-                if (data.getOriginalArmor() != null) {
-                    player.getInventory().setArmorContents(data.getOriginalArmor());
-                }
-                if (data.getOriginalExtraContents() != null) {
-                    player.getInventory().setExtraContents(data.getOriginalExtraContents());
-                }
-                
-                // Marcar como não está mais em duty
-                data.setInDuty(false);
-                data.setCurrentDuty(null);
+        if (data != null && data.isInDuty()) {
+            // Restaurar inventário original antes de salvar
+            if (data.getOriginalInventory() != null) {
+                player.getInventory().setContents(data.getOriginalInventory());
+            }
+            if (data.getOriginalArmor() != null) {
+                player.getInventory().setArmorContents(data.getOriginalArmor());
+            }
+            if (data.getOriginalExtraContents() != null) {
+                player.getInventory().setExtraContents(data.getOriginalExtraContents());
             }
             
-            CompletableFuture.runAsync(() -> {
-                savePlayerData();
-            });
+            data.setInDuty(false);
+            data.setCurrentDuty(null);
+            
+            savePlayerData();
         }
     }
     
@@ -1110,7 +1130,7 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
             if (inventoryContents != null) {
                 ItemStack[] copy = new ItemStack[inventoryContents.length];
                 for (int i = 0; i < inventoryContents.length; i++) {
-                    if (inventoryContents[i] != null) {
+                    if (inventoryContents[i] != null && inventoryContents[i].getType() != Material.AIR) {
                         copy[i] = inventoryContents[i].clone();
                     }
                 }
@@ -1119,7 +1139,7 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
             if (armorContents != null) {
                 ItemStack[] copy = new ItemStack[armorContents.length];
                 for (int i = 0; i < armorContents.length; i++) {
-                    if (armorContents[i] != null) {
+                    if (armorContents[i] != null && armorContents[i].getType() != Material.AIR) {
                         copy[i] = armorContents[i].clone();
                     }
                 }
@@ -1128,7 +1148,7 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
             if (extraContents != null) {
                 ItemStack[] copy = new ItemStack[extraContents.length];
                 for (int i = 0; i < extraContents.length; i++) {
-                    if (extraContents[i] != null) {
+                    if (extraContents[i] != null && extraContents[i].getType() != Material.AIR) {
                         copy[i] = extraContents[i].clone();
                     }
                 }
@@ -1142,72 +1162,33 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
             section.set("extra", serializeItemStackArray(extraContents));
         }
         
-        public void loadFromConfig(ConfigurationSection section) {
-            this.inventoryContents = deserializeItemStackArray(section.getString("inventory"));
-            this.armorContents = deserializeItemStackArray(section.getString("armor"));
-            this.extraContents = deserializeItemStackArray(section.getString("extra"));
+        public void loadFromConfig(ConfigurationSection section, DutyCraft plugin) {
+            this.inventoryContents = plugin.deserializeItemStackArray(section.getString("inventory"));
+            this.armorContents = plugin.deserializeItemStackArray(section.getString("armor"));
+            this.extraContents = plugin.deserializeItemStackArray(section.getString("extra"));
             
             // Reaplicar NBT nos itens carregados
             if (this.inventoryContents != null) {
                 for (int i = 0; i < this.inventoryContents.length; i++) {
                     if (this.inventoryContents[i] != null && this.inventoryContents[i].getType() != Material.AIR) {
-                        this.inventoryContents[i] = markAsDutyItem(this.inventoryContents[i], name);
+                        this.inventoryContents[i] = plugin.markAsDutyItem(this.inventoryContents[i], name);
                     }
                 }
             }
             if (this.armorContents != null) {
                 for (int i = 0; i < this.armorContents.length; i++) {
                     if (this.armorContents[i] != null && this.armorContents[i].getType() != Material.AIR) {
-                        this.armorContents[i] = markAsDutyItem(this.armorContents[i], name);
+                        this.armorContents[i] = plugin.markAsDutyItem(this.armorContents[i], name);
                     }
                 }
             }
             if (this.extraContents != null) {
                 for (int i = 0; i < this.extraContents.length; i++) {
                     if (this.extraContents[i] != null && this.extraContents[i].getType() != Material.AIR) {
-                        this.extraContents[i] = markAsDutyItem(this.extraContents[i], name);
+                        this.extraContents[i] = plugin.markAsDutyItem(this.extraContents[i], name);
                     }
                 }
             }
-        }
-        
-        private String serializeItemStackArray(ItemStack[] items) {
-            if (items == null) return "";
-            
-            StringBuilder sb = new StringBuilder();
-            for (ItemStack item : items) {
-                if (item != null && item.getType() != Material.AIR) {
-                    sb.append(item.getType().toString()).append(":").append(item.getAmount()).append(";");
-                } else {
-                    sb.append("AIR:0;");
-                }
-            }
-            return sb.toString();
-        }
-        
-        private ItemStack[] deserializeItemStackArray(String data) {
-            if (data == null || data.isEmpty()) return new ItemStack[0];
-            
-            String[] parts = data.split(";");
-            ItemStack[] items = new ItemStack[parts.length];
-            
-            for (int i = 0; i < parts.length; i++) {
-                String[] itemData = parts[i].split(":");
-                try {
-                    Material material = Material.getMaterial(itemData[0]);
-                    int amount = Integer.parseInt(itemData[1]);
-                    
-                    if (material != null && material != Material.AIR && amount > 0) {
-                        items[i] = new ItemStack(material, amount);
-                    } else {
-                        items[i] = new ItemStack(Material.AIR);
-                    }
-                } catch (Exception e) {
-                    items[i] = new ItemStack(Material.AIR);
-                }
-            }
-            
-            return items;
         }
     }
     
@@ -1279,51 +1260,12 @@ public class DutyCraft extends JavaPlugin implements Listener, TabCompleter {
             }
         }
         
-        public void loadFromConfig(ConfigurationSection section) {
+        public void loadFromConfig(ConfigurationSection section, DutyCraft plugin) {
             this.inDuty = section.getBoolean("inDuty", false);
             this.currentDuty = section.getString("currentDuty");
-            this.originalInventory = deserializeItemStackArray(section.getString("originalInventory"));
-            this.originalArmor = deserializeItemStackArray(section.getString("originalArmor"));
-            this.originalExtraContents = deserializeItemStackArray(section.getString("originalExtra"));
-        }
-        
-        private String serializeItemStackArray(ItemStack[] items) {
-            if (items == null) return "";
-            
-            StringBuilder sb = new StringBuilder();
-            for (ItemStack item : items) {
-                if (item != null && item.getType() != Material.AIR) {
-                    sb.append(item.getType().toString()).append(":").append(item.getAmount()).append(";");
-                } else {
-                    sb.append("AIR:0;");
-                }
-            }
-            return sb.toString();
-        }
-        
-        private ItemStack[] deserializeItemStackArray(String data) {
-            if (data == null || data.isEmpty()) return new ItemStack[0];
-            
-            String[] parts = data.split(";");
-            ItemStack[] items = new ItemStack[parts.length];
-            
-            for (int i = 0; i < parts.length; i++) {
-                String[] itemData = parts[i].split(":");
-                try {
-                    Material material = Material.getMaterial(itemData[0]);
-                    int amount = Integer.parseInt(itemData[1]);
-                    
-                    if (material != null && material != Material.AIR && amount > 0) {
-                        items[i] = new ItemStack(material, amount);
-                    } else {
-                        items[i] = new ItemStack(Material.AIR);
-                    }
-                } catch (Exception e) {
-                    items[i] = new ItemStack(Material.AIR);
-                }
-            }
-            
-            return items;
+            this.originalInventory = plugin.deserializeItemStackArray(section.getString("originalInventory"));
+            this.originalArmor = plugin.deserializeItemStackArray(section.getString("originalArmor"));
+            this.originalExtraContents = plugin.deserializeItemStackArray(section.getString("originalExtra"));
         }
     }
 }
